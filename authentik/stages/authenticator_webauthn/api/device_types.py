@@ -22,6 +22,7 @@ class WebAuthnDeviceTypeViewSet(ReadOnlyModelViewSet):
 
     queryset = WebAuthnDeviceType.objects.all()
     serializer_class = WebAuthnDeviceTypeSerializer
-    filterset_fields = "__all__"
+    # Explicit: "__all__" cannot build filters for the JSON columns holding attestation data
+    filterset_fields = ["aaguid", "description", "icon"]
     ordering = ["description"]
     search_fields = ["description", "aaguid"]
