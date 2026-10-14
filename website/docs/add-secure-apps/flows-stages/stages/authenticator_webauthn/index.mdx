@@ -24,6 +24,7 @@ Enrolled authenticators can later be used with the [Authenticator Validation sta
 - **Device type restrictions**: limit enrollment to specific WebAuthn device types.
 - **Attestation requirement**: require cryptographic proof of an authenticator's claimed device identity.
 - **Backup eligibility**: restrict enrollment based on whether the credential can be backed up or synced across devices.
+- **Key protection**: restrict enrollment to authenticator models that protect their keys in specific ways (for example in a secure element).
 - **Maximum registration attempts**: maximum number of failed registration attempts before the stage denies access. A value of `0` disables the limit.
 - **Authenticator type name**: optional friendly name shown to the user in self-service settings.
 - **Configuration flow**: optional authenticated flow that lets users enroll this authenticator from user settings.
@@ -133,4 +134,31 @@ This proves the manufacturer identity of the authenticator; it does not restrict
 
 :::caution
 Requiring attestation rejects authenticators whose manufacturer does not participate in the FIDO Metadata Service, or that authentik's bundled metadata snapshot does not yet contain. Test with your users' actual hardware before enforcing it broadly.
+:::
+
+### Key protection
+
+**Key protection** restricts registration to authenticator models whose FIDO Metadata Service entry declares specific `keyProtection` types. This is what lets you require, for example, that keys live in a security chip rather than in software.
+
+Accepted types:
+
+- `software`: keys are handled by software on the host
+- `hardware`: keys are protected by hardware, isolated from the host OS
+- `tee`: keys are held in a Trusted Execution Environment
+- `secure_element`: keys are held in a dedicated secure element
+- `remote_handle`: key material is stored outside the authenticator, wrapped by a key that never leaves it
+
+A model can declare several types at once (a YubiKey 5 declares `hardware`, `secure_element` and `remote_handle`). The selection is the list of **accepted** types. With nothing selected, no restriction applies. **Key protection matching** defines how the types a model declares are compared with that list:
+
+- **Any**: at least one declared type must be accepted. This is the weaker mode: a model that declares an accepted type next to an unaccepted one still passes.
+- **All**: every declared type must be accepted, and at least one must be declared. A model that declares anything outside the list is rejected.
+
+To allow only hardware-backed keys, select `hardware`, `secure_element` and `tee` (add `remote_handle` if you want to accept models such as YubiKeys that declare it) and use **All**. `software` is then never accepted, even when a model combines it with other types.
+
+:::info
+Key protection requires **Attestation requirement: Required**, and the API refuses configurations that combine them otherwise. The value comes from the metadata entry of the authenticator's AAGUID; without verified attestation that AAGUID is only self-reported and the check would prove nothing. Authenticators without a metadata entry, or without a trusted attestation root, are rejected.
+:::
+
+:::caution
+`keyProtection` is the manufacturer's published claim about a *model*, taken from the FIDO Metadata Service. authentik does not verify it independently, and it only applies to newly registered credentials. It is not re-evaluated on later logins.
 :::

@@ -47,6 +47,7 @@ from authentik.stages.authenticator_webauthn.models import (
     AttestationRequirement,
     AuthenticatorWebAuthnStage,
     CredentialBackupEligibility,
+    KeyProtectionMatchMode,
     WebAuthnDevice,
     WebAuthnDeviceType,
 )
@@ -127,8 +128,14 @@ class AuthenticatorWebAuthnChallengeResponse(ChallengeResponse):
         }
 
     def _attestation_enforced(self, stage: AuthenticatorWebAuthnStage) -> bool:
-        """Whether attestation chain validation must be performed for this stage."""
-        return stage.attestation_requirement == AttestationRequirement.REQUIRED
+        """Whether attestation chain validation must be performed for this stage. Key
+        protection restrictions imply it: `keyProtection` comes from the metadata entry of
+        the claimed AAGUID, which is only trustworthy once attestation has been verified.
+        This also holds if the stage was configured without going through the API
+        validation."""
+        return stage.attestation_requirement == AttestationRequirement.REQUIRED or bool(
+            stage.key_protection_types
+        )
 
     def validate_response(self, response: dict) -> VerifiedRegistrationData:
         """Validate webauthn challenge response"""
@@ -250,7 +257,43 @@ class AuthenticatorWebAuthnChallengeResponse(ChallengeResponse):
                         )
                     )
                 )
+
+        if stage.key_protection_types:
+            self._check_key_protection(stage, registration_data)
         return registration_data
+
+    def _check_key_protection(
+        self, stage: AuthenticatorWebAuthnStage, registration_data: VerifiedRegistrationData
+    ) -> None:
+        """Check the `keyProtection` types published for the authenticator model against the
+        accepted types selected on the stage:
+        - ANY: at least one declared type must be accepted
+        - ALL: every declared type must be accepted, so a model that also declares an
+          unaccepted type (e.g. `software`) is rejected"""
+        not_met_error = ValidationError(
+            _(
+                "This authenticator does not meet the required key protection level. "
+                "Please use a different authenticator, or contact your {brand} "
+                "administrator for help.".format(brand=self.stage.request.brand.branding_title)
+            )
+        )
+        # keyProtection is only a security signal if the AAGUID was proven by attestation
+        if not registration_data.attestation_trusted:
+            raise not_met_error
+        device_type = WebAuthnDeviceType.objects.filter(
+            aaguid=registration_data.registration.aaguid
+        ).first()
+        if not device_type:
+            raise not_met_error
+        declared = set(device_type.key_protection or [])
+        selected = set(stage.key_protection_types)
+        if stage.key_protection_match_mode == KeyProtectionMatchMode.ALL:
+            # An empty declaration must not pass the subset test vacuously
+            met = bool(declared) and declared <= selected
+        else:
+            met = bool(declared & selected)
+        if not met:
+            raise not_met_error
 
 
 class AuthenticatorWebAuthnStageView(ChallengeStageView):

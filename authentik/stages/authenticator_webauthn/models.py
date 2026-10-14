@@ -137,6 +137,43 @@ class AttestationRequirement(models.TextChoices):
     REQUIRED = "required"
 
 
+class KeyProtectionType(models.TextChoices):
+    """How an authenticator protects its private keys, as published in the `keyProtection`
+    field of its FIDO Metadata Service metadata statement. A model can list several values,
+    for example `["hardware", "secure_element"]`.
+
+    Members:
+        `SOFTWARE`: Keys are handled by software running on the host, without isolation
+        `HARDWARE`: Keys are protected by hardware, isolated from the host OS
+        `TEE`: Keys are held in a Trusted Execution Environment
+        `SECURE_ELEMENT`: Keys are held in a dedicated secure element / security chip
+        `REMOTE_HANDLE`: Key material is stored outside the authenticator, wrapped by a key
+            that never leaves it (key handle / wrapped credential)
+
+    https://fidoalliance.org/specs/common-specs/fido-registry-v2.1-ps-20191217.html#key-protection-types
+    """
+
+    SOFTWARE = "software"
+    HARDWARE = "hardware"
+    TEE = "tee"
+    SECURE_ELEMENT = "secure_element"
+    REMOTE_HANDLE = "remote_handle"
+
+
+class KeyProtectionMatchMode(models.TextChoices):
+    """How the types an authenticator model declares are compared against the accepted
+    types selected on a stage.
+
+    Members:
+        `ANY`: At least one declared type must be in the accepted list
+        `ALL`: Every declared type must be in the accepted list (and at least one must be
+            declared). A model that declares any type outside the list is rejected.
+    """
+
+    ANY = "any"
+    ALL = "all"
+
+
 class AuthenticatorWebAuthnStage(ConfigurableStage, FriendlyNamedStage, Stage):
     """Setup WebAuthn-based authentication for the user."""
 
@@ -170,6 +207,16 @@ class AuthenticatorWebAuthnStage(ConfigurableStage, FriendlyNamedStage, Stage):
     attestation_requirement = models.TextField(
         choices=AttestationRequirement.choices,
         default=AttestationRequirement.NOT_REQUIRED,
+    )
+
+    key_protection_types = ArrayField(
+        models.TextField(choices=KeyProtectionType.choices),
+        default=list,
+        blank=True,
+    )
+    key_protection_match_mode = models.TextField(
+        choices=KeyProtectionMatchMode.choices,
+        default=KeyProtectionMatchMode.ANY,
     )
 
     max_attempts = models.PositiveIntegerField(default=0)
@@ -285,6 +332,12 @@ class WebAuthnDeviceType(InternallyManagedMixin, SerializerModel):
     # against one of these roots. Empty for device types without an attestation root (e.g.
     # surrogate/self attestation only) or for entries from the supplementary AAGUID list.
     attestation_root_certificates = models.JSONField(default=list, blank=True)
+
+    # `keyProtection` values from this device's FIDO Metadata Service metadata statement
+    # (see KeyProtectionType). Only meaningful as a security signal for a credential whose
+    # attestation was validated against `attestation_root_certificates`; otherwise the
+    # AAGUID that led here is merely self-reported.
+    key_protection = models.JSONField(default=list, blank=True)
 
     @property
     def serializer(self) -> Serializer:

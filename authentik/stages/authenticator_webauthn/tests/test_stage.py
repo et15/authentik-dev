@@ -23,6 +23,7 @@ from authentik.stages.authenticator_webauthn.models import (
     AttestationRequirement,
     AuthenticatorWebAuthnStage,
     CredentialBackupEligibility,
+    KeyProtectionMatchMode,
     WebAuthnDevice,
     WebAuthnDeviceType,
     WebAuthnHint,
@@ -913,3 +914,216 @@ class TestAuthenticatorWebAuthnStage(FlowTestCase):
                 "different authenticator, or contact your authentik administrator for help."
             ),
         )
+
+    # --- Key protection ---
+
+    KEY_PROTECTION_ERROR = (
+        "This authenticator does not meet the required key protection level. Please use a "
+        "different authenticator, or contact your authentik administrator for help."
+    )
+
+    def _register_with_key_protection(
+        self,
+        selected: list[str],
+        declared: list[str],
+        mode: str = KeyProtectionMatchMode.ANY,
+        attestation_requirement: str = AttestationRequirement.REQUIRED,
+    ):
+        """Configure the stage, register a device type declaring `declared` key protection
+        with a valid trust anchor, and post a correctly attested credential for it."""
+        self.stage.attestation_requirement = attestation_requirement
+        self.stage.key_protection_types = selected
+        self.stage.key_protection_match_mode = mode
+        self.stage.save()
+        root_key, root_pem = generate_test_root_ca()
+        challenge, aaguid = os.urandom(32), os.urandom(16)
+        WebAuthnDeviceType.objects.create(
+            aaguid=UUID(bytes=aaguid),
+            description="Key protection test device",
+            attestation_root_certificates=[root_pem],
+            key_protection=declared,
+        )
+        self._prepare_plan(challenge)
+        return self._post_credential(
+            build_synthetic_packed_attestation(aaguid, challenge, root_key)
+        )
+
+    def test_key_protection_any_match(self):
+        """any: one declared type being accepted is enough"""
+        response = self._register_with_key_protection(
+            ["secure_element", "tee"], ["hardware", "secure_element"]
+        )
+        self.assertStageRedirects(response, reverse("authentik_core:root-redirect"))
+        self.assertTrue(WebAuthnDevice.objects.filter(user=self.user).exists())
+
+    def test_key_protection_any_no_match(self):
+        """any: reject when none of the declared types is accepted"""
+        response = self._register_with_key_protection(["tee"], ["hardware", "secure_element"])
+        self._assert_registration_error(response, self.KEY_PROTECTION_ERROR)
+
+    def test_key_protection_any_tolerates_unaccepted_extra_type(self):
+        """any (documented weakness): a model declaring an accepted type next to an
+        unaccepted one (here software) still passes. Use `all` to exclude such models."""
+        response = self._register_with_key_protection(["hardware"], ["hardware", "software"])
+        self.assertStageRedirects(response, reverse("authentik_core:root-redirect"))
+        self.assertTrue(WebAuthnDevice.objects.filter(user=self.user).exists())
+
+    def test_key_protection_all_match(self):
+        """all: accept when every declared type is accepted"""
+        response = self._register_with_key_protection(
+            ["hardware", "secure_element", "remote_handle"],
+            ["hardware", "secure_element", "remote_handle"],
+            mode=KeyProtectionMatchMode.ALL,
+        )
+        self.assertStageRedirects(response, reverse("authentik_core:root-redirect"))
+        self.assertTrue(WebAuthnDevice.objects.filter(user=self.user).exists())
+
+    def test_key_protection_all_extra_accepted_types_are_fine(self):
+        """all: the accepted list may be broader than what the model declares"""
+        response = self._register_with_key_protection(
+            ["hardware", "secure_element", "tee"],
+            ["hardware", "secure_element"],
+            mode=KeyProtectionMatchMode.ALL,
+        )
+        self.assertStageRedirects(response, reverse("authentik_core:root-redirect"))
+        self.assertTrue(WebAuthnDevice.objects.filter(user=self.user).exists())
+
+    def test_key_protection_all_rejects_unaccepted_declared_type(self):
+        """all: reject when the model declares a type outside the accepted list"""
+        response = self._register_with_key_protection(
+            ["hardware", "secure_element"],
+            ["hardware", "tee"],
+            mode=KeyProtectionMatchMode.ALL,
+        )
+        self._assert_registration_error(response, self.KEY_PROTECTION_ERROR)
+
+    def test_key_protection_all_rejects_software_mix(self):
+        """all: a model mixing software with hardware types is rejected when software is
+        not accepted, which is the point of using `all` for "hardware keys only" """
+        response = self._register_with_key_protection(
+            ["hardware", "secure_element", "tee", "remote_handle"],
+            ["hardware", "software"],
+            mode=KeyProtectionMatchMode.ALL,
+        )
+        self._assert_registration_error(response, self.KEY_PROTECTION_ERROR)
+
+    def test_key_protection_all_rejects_software_remote_handle(self):
+        """all: software + remote_handle is rejected although remote_handle is accepted"""
+        response = self._register_with_key_protection(
+            ["hardware", "secure_element", "tee", "remote_handle"],
+            ["software", "remote_handle"],
+            mode=KeyProtectionMatchMode.ALL,
+        )
+        self._assert_registration_error(response, self.KEY_PROTECTION_ERROR)
+
+    def test_key_protection_all_empty_declaration(self):
+        """all: a model declaring nothing must not pass the subset test vacuously"""
+        response = self._register_with_key_protection(
+            ["hardware"], [], mode=KeyProtectionMatchMode.ALL
+        )
+        self._assert_registration_error(response, self.KEY_PROTECTION_ERROR)
+
+    def test_key_protection_software_only_device(self):
+        """a software-only authenticator does not satisfy a hardware requirement"""
+        response = self._register_with_key_protection(["hardware"], ["software"])
+        self._assert_registration_error(response, self.KEY_PROTECTION_ERROR)
+
+    def test_key_protection_device_without_metadata(self):
+        """a device type that declares no key protection satisfies no selection"""
+        response = self._register_with_key_protection(["hardware"], [])
+        self._assert_registration_error(response, self.KEY_PROTECTION_ERROR)
+
+    def test_key_protection_implies_attestation(self):
+        """Even if the stage was saved without going through the API validation (so
+        attestation_requirement is not_required), key protection still forces attestation:
+        an unattestable device is rejected instead of its self-reported AAGUID being trusted"""
+        self.stage.attestation_requirement = AttestationRequirement.NOT_REQUIRED
+        self.stage.key_protection_types = ["hardware"]
+        self.stage.save()
+        root_key, _root_pem = generate_test_root_ca()
+        challenge, aaguid = os.urandom(32), os.urandom(16)
+        # Device type claims hardware protection but has no trust anchor to prove it
+        WebAuthnDeviceType.objects.create(
+            aaguid=UUID(bytes=aaguid), description="Claimed", key_protection=["hardware"]
+        )
+        self._prepare_plan(challenge)
+        response = self._post_credential(
+            build_synthetic_packed_attestation(aaguid, challenge, root_key)
+        )
+        self._assert_registration_error(
+            response,
+            (
+                "This authenticator's security level could not be verified. Please use a "
+                "different authenticator, or contact your authentik administrator for help."
+            ),
+        )
+
+    def test_key_protection_spoofed_aaguid(self):
+        """A device claiming the AAGUID of a hardware-protected model, but attested by a
+        different CA, is rejected"""
+        self.stage.attestation_requirement = AttestationRequirement.REQUIRED
+        self.stage.key_protection_types = ["secure_element"]
+        self.stage.save()
+        attacker_key, _attacker_pem = generate_test_root_ca()
+        _vendor_key, vendor_pem = generate_test_root_ca()
+        challenge, aaguid = os.urandom(32), os.urandom(16)
+        WebAuthnDeviceType.objects.create(
+            aaguid=UUID(bytes=aaguid),
+            description="Secure vendor key",
+            attestation_root_certificates=[vendor_pem],
+            key_protection=["hardware", "secure_element"],
+        )
+        self._prepare_plan(challenge)
+        response = self._post_credential(
+            build_synthetic_packed_attestation(aaguid, challenge, attacker_key)
+        )
+        self._assert_registration_error(
+            response,
+            (
+                "This authenticator's attestation could not be verified against a trusted "
+                "certificate. Contact your authentik administrator for help."
+            ),
+        )
+
+    def test_api_key_protection_requires_attestation(self):
+        """The API refuses key protection restrictions without required attestation"""
+        self.client.force_login(self.user)
+        url = reverse("authentik_api:authenticatorwebauthnstage-list")
+        response = self.client.post(
+            url,
+            data={"name": generate_id(), "key_protection_types": ["hardware"]},
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("attestation_requirement", response.json())
+        response = self.client.post(
+            url,
+            data={
+                "name": generate_id(),
+                "key_protection_types": ["hardware"],
+                "attestation_requirement": "required",
+            },
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 201)
+
+    def test_api_key_protection_partial_update(self):
+        """Lowering attestation to not_required on a stage with key protection is refused,
+        and so is adding key protection to a stage that does not require attestation"""
+        self.client.force_login(self.user)
+        detail = reverse(
+            "authentik_api:authenticatorwebauthnstage-detail", kwargs={"pk": self.stage.pk}
+        )
+        response = self.client.patch(
+            detail, data={"key_protection_types": ["tee"]}, content_type="application/json"
+        )
+        self.assertEqual(response.status_code, 400)
+        self.stage.attestation_requirement = AttestationRequirement.REQUIRED
+        self.stage.key_protection_types = ["tee"]
+        self.stage.save()
+        response = self.client.patch(
+            detail,
+            data={"attestation_requirement": "not_required"},
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 400)

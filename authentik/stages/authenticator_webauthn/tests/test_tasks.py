@@ -43,6 +43,29 @@ class TestWebAuthnMDSImport(TestCase):
         for pem in device_type.attestation_root_certificates:
             self.assertIn("-----BEGIN CERTIFICATE-----", pem)
 
+    def test_import_stores_key_protection(self):
+        """Import persists the key protection types of MDS entries"""
+        webauthn_mds_import.send(force=True)
+        yubikey = (
+            WebAuthnDeviceType.objects.filter(description__startswith="YubiKey 5")
+            .exclude(key_protection=[])
+            .first()
+        )
+        self.assertIsNotNone(yubikey)
+        self.assertIn("hardware", yubikey.key_protection)
+        self.assertIn("secure_element", yubikey.key_protection)
+
+    def test_import_after_upgrade_repopulates_key_protection(self):
+        """A blob imported by the version that only stored trust anchors (v2) is imported
+        again, so key protection becomes available without force"""
+        webauthn_mds_import.send(force=True)
+        self.assertTrue(WebAuthnDeviceType.objects.exclude(key_protection=[]).exists())
+        WebAuthnDeviceType.objects.update(key_protection=[])
+        cache.delete(CACHE_KEY_MDS_NO)
+        cache.set(f"{CACHE_KEY_MDS_NO_PREFIX}/v2", self.blob_no)
+        webauthn_mds_import.send()
+        self.assertTrue(WebAuthnDeviceType.objects.exclude(key_protection=[]).exists())
+
     def test_import_after_upgrade_repopulates(self):
         """An unchanged blob that was imported before trust anchors were stored is
         imported again, without needing force"""

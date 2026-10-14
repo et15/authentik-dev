@@ -24,7 +24,8 @@ CACHE_KEY_MDS_NO_PREFIX = "goauthentik.io/stages/authenticator_webauthn/mds_no"
 # that were already imported by an older version are imported again after an upgrade.
 #   1 (unversioned key): description, icon
 #   2: + attestation_root_certificates
-MDS_IMPORT_VERSION = 2
+#   3: + key_protection
+MDS_IMPORT_VERSION = 3
 CACHE_KEY_MDS_NO = f"{CACHE_KEY_MDS_NO_PREFIX}/v{MDS_IMPORT_VERSION}"
 AAGUID_BLOB_PATH = Path(__file__).parent / "mds" / "aaguid.json"
 MDS_BLOB_PATH = Path(__file__).parent / "mds" / "blob.jwt"
@@ -81,13 +82,19 @@ def webauthn_mds_import(force=False):
                     description=metadata.description,
                     icon=metadata.icon,
                     attestation_root_certificates=_root_certs_as_pem(entry),
+                    key_protection=[str(kp) for kp in (metadata.key_protection or [])],
                 )
             )
     with atomic():
         WebAuthnDeviceType.objects.bulk_create(
             to_create_update,
             update_conflicts=True,
-            update_fields=["description", "icon", "attestation_root_certificates"],
+            update_fields=[
+                "description",
+                "icon",
+                "attestation_root_certificates",
+                "key_protection",
+            ],
             unique_fields=["aaguid"],
         )
         WebAuthnDeviceType.objects.filter(aaguid__in=to_delete).delete()

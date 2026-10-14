@@ -17,6 +17,7 @@ import {
     AuthenticatorWebAuthnStage,
     BackupEligibilityEnum,
     FlowDesignationEnum,
+    KeyProtectionMatchModeEnum,
     StagesApi,
     UserVerificationEnum,
     WebAuthnHintEnum,
@@ -60,6 +61,20 @@ export class AuthenticatorWebAuthnStageForm extends BaseStageForm<AuthenticatorW
 
         const selectedHints: DualSelectPair[] = (this.instance?.hints ?? [])
             .map((hint) => allHints.find(([key]) => key === hint)!)
+            .filter(Boolean);
+
+        const allKeyProtectionTypes: DualSelectPair[] = [
+            ["software", msg("Software (keys handled by host software)")],
+            ["hardware", msg("Hardware (keys protected by hardware, isolated from the OS)")],
+            ["tee", msg("TEE (Trusted Execution Environment)")],
+            ["secure_element", msg("Secure element (dedicated security chip)")],
+            ["remote_handle", msg("Remote handle (wrapped key material stored outside the device)")],
+        ];
+
+        const selectedKeyProtectionTypes: DualSelectPair[] = (
+            this.instance?.keyProtectionTypes ?? []
+        )
+            .map((type) => allKeyProtectionTypes.find(([key]) => key === type)!)
             .filter(Boolean);
 
         return html` <span>
@@ -315,6 +330,53 @@ export class AuthenticatorWebAuthnStageForm extends BaseStageForm<AuthenticatorW
                                 "Enforced using the WebAuthn Backup Eligibility (BE) flag, which authenticators set permanently when a credential is created. Only applies to newly registered credentials.",
                             )}
                         </p>
+                    </ak-form-element-horizontal>
+                    <ak-form-element-horizontal
+                        label=${msg("Key protection")}
+                        name="keyProtectionTypes"
+                    >
+                        <ak-dual-select-provider
+                            .provider=${(): Promise<DataProvision> => {
+                                return Promise.resolve({
+                                    options: allKeyProtectionTypes,
+                                });
+                            }}
+                            .selected=${selectedKeyProtectionTypes}
+                            available-label="${msg("Available protection types")}"
+                            selected-label="${msg("Accepted protection types")}"
+                            no-search
+                            no-status
+                        ></ak-dual-select-provider>
+                        <p class="pf-c-form__helper-text">
+                            ${msg(
+                                "Accepted ways of protecting keys. Registration is restricted to authenticator models whose protection, according to the FIDO Metadata Service, falls within this list (see matching below). When nothing is selected, no restriction applies. Setting this requires 'Attestation requirement' to be 'Required'.",
+                            )}
+                        </p>
+                    </ak-form-element-horizontal>
+                    <ak-form-element-horizontal
+                        label=${msg("Key protection matching")}
+                        required
+                        name="keyProtectionMatchMode"
+                    >
+                        <ak-radio
+                            .options=${[
+                                {
+                                    label: msg(
+                                        "Any: At least one protection type the authenticator declares must be in the accepted list.",
+                                    ),
+                                    value: KeyProtectionMatchModeEnum.Any,
+                                    default: true,
+                                },
+                                {
+                                    label: msg(
+                                        "All: Every protection type the authenticator declares must be in the accepted list. Authenticators that also declare an unaccepted type (such as software) are rejected.",
+                                    ),
+                                    value: KeyProtectionMatchModeEnum.All,
+                                },
+                            ]}
+                            .value=${this.instance?.keyProtectionMatchMode}
+                        >
+                        </ak-radio>
                     </ak-form-element-horizontal>
                     <ak-form-element-horizontal
                         label=${msg("Configuration flow")}
