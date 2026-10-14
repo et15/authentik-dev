@@ -13,7 +13,7 @@ from django.utils.translation import gettext_lazy as _
 from rest_framework.fields import CharField
 from rest_framework.serializers import ValidationError
 from webauthn.helpers.bytes_to_base64url import bytes_to_base64url
-from webauthn.helpers.exceptions import InvalidAttestationObjectStructure, WebAuthnException
+from webauthn.helpers.exceptions import WebAuthnException
 from webauthn.helpers.options_to_json_dict import options_to_json_dict
 from webauthn.helpers.parse_attestation_object import parse_attestation_object
 from webauthn.helpers.structs import (
@@ -57,6 +57,14 @@ PLAN_CONTEXT_WEBAUTHN_CHALLENGE = "goauthentik.io/stages/authenticator_webauthn/
 PLAN_CONTEXT_WEBAUTHN_ATTEMPT = "goauthentik.io/stages/authenticator_webauthn/attempt"
 
 
+# Attestation formats for which webauthn validates the certificate chain exclusively against
+# the roots passed via `pem_root_certs_bytes_by_fmt`. All others cannot prove the claimed AAGUID:
+# "none" carries no proof, "fido-u2f" has no AAGUID, and "apple", "android-key" and
+# "android-safetynet" add roots of their own, so a valid Apple/Google chain would be accepted
+# for any claimed AAGUID.
+ROOT_VALIDATED_ATTESTATION_FORMATS = (AttestationFormat.PACKED, AttestationFormat.TPM)
+
+
 @dataclass
 class VerifiedRegistrationData:
     registration: VerifiedRegistration
@@ -89,13 +97,14 @@ class AuthenticatorWebAuthnChallengeResponse(ChallengeResponse):
         """Parse the raw, not-yet-verified attestationObject to read its format and claimed
         AAGUID *before* calling verify_registration_response, so the right per-AAGUID trust
         anchors can be supplied to that call. Verifies nothing by itself."""
-        raw_attestation_object = (response.get("response") or {}).get("attestationObject")
-        if not raw_attestation_object:
+        inner = response.get("response")
+        raw_attestation_object = inner.get("attestationObject") if isinstance(inner, dict) else None
+        if not raw_attestation_object or not isinstance(raw_attestation_object, str):
             return None
         padded = raw_attestation_object + "=" * (-len(raw_attestation_object) % 4)
         try:
             return parse_attestation_object(urlsafe_b64decode(padded))
-        except InvalidAttestationObjectStructure, ValueError:
+        except WebAuthnException, ValueError:
             return None
 
     def _trusted_roots_for_attestation(
@@ -113,7 +122,12 @@ class AuthenticatorWebAuthnChallengeResponse(ChallengeResponse):
             )
         )
         pre_att_obj = self._get_pre_attestation(response)
-        if pre_att_obj is None or pre_att_obj.fmt == AttestationFormat.NONE:
+        if pre_att_obj is None or pre_att_obj.fmt not in ROOT_VALIDATED_ATTESTATION_FORMATS:
+            raise unverifiable_error
+        # Without a certificate chain there is nothing to validate against the roots. For
+        # "packed" the library treats a statement without x5c as self attestation (signed
+        # with the credential's own key) and skips the chain validation entirely.
+        if not pre_att_obj.att_stmt or not pre_att_obj.att_stmt.x5c:
             raise unverifiable_error
         attested = pre_att_obj.auth_data.attested_credential_data
         if not attested or not attested.aaguid:
@@ -122,7 +136,7 @@ class AuthenticatorWebAuthnChallengeResponse(ChallengeResponse):
         if not device_type or not device_type.attestation_root_certificates:
             raise unverifiable_error
         return {
-            pre_att_obj.fmt: [
+            AttestationFormat(pre_att_obj.fmt): [
                 pem.encode("utf-8") for pem in device_type.attestation_root_certificates
             ]
         }

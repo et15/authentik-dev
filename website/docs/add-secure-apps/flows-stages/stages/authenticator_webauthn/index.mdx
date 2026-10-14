@@ -122,7 +122,7 @@ BE is a value reported by the authenticator. It is covered by the attestation/as
 
 By default, authentik trusts the AAGUID (device model identifier) an authenticator reports without cryptographic proof; nothing in the protocol stops a client from claiming an arbitrary AAGUID. **Attestation requirement: Required** closes this gap:
 
-- The authenticator must return a full attestation statement (not `none`) with a certificate chain for its attestation key.
+- The authenticator must return a full attestation statement with a certificate chain for its attestation key, using the `packed` or `tpm` attestation format. Statements without a certificate chain (such as `none` and `packed` self attestation) are rejected, as are formats that authentik cannot validate against the manufacturer's own root certificates (`apple`, `android-key`, `android-safetynet` and `fido-u2f`).
 - Its claimed AAGUID must exist in authentik's FIDO Metadata Service data (kept current by the `webauthn_mds_import` task) with at least one published trusted root certificate.
 - The certificate chain must validate against one of those roots.
 

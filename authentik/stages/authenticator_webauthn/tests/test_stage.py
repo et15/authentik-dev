@@ -781,6 +781,11 @@ class TestAuthenticatorWebAuthnStage(FlowTestCase):
 
     # --- Attestation requirement ---
 
+    UNVERIFIABLE_ERROR = (
+        "This authenticator's security level could not be verified. Please use a "
+        "different authenticator, or contact your authentik administrator for help."
+    )
+
     def _post_credential(self, credential: dict):
         return self.client.post(
             reverse("authentik_api:flow-executor", kwargs={"flow_slug": self.flow.slug}),
@@ -914,6 +919,58 @@ class TestAuthenticatorWebAuthnStage(FlowTestCase):
                 "different authenticator, or contact your authentik administrator for help."
             ),
         )
+
+    def test_register_attestation_required_self_attestation(self):
+        """required: reject "packed" self attestation (no certificate chain) even though the
+        AAGUID has trust anchors, as the library skips chain validation for it"""
+        self.stage.attestation_requirement = AttestationRequirement.REQUIRED
+        self.stage.save()
+        root_key, root_pem = generate_test_root_ca()
+        challenge, aaguid = os.urandom(32), os.urandom(16)
+        WebAuthnDeviceType.objects.create(
+            aaguid=UUID(bytes=aaguid),
+            description="Attestable",
+            attestation_root_certificates=[root_pem],
+        )
+        self._prepare_plan(challenge)
+        response = self._post_credential(
+            build_synthetic_packed_attestation(aaguid, challenge, root_key, self_attestation=True)
+        )
+        self._assert_registration_error(response, self.UNVERIFIABLE_ERROR)
+
+    def test_register_attestation_required_format_without_own_roots(self):
+        """required: reject formats that add trust anchors of their own (here: apple), as a
+        valid chain to those would be accepted for any claimed AAGUID"""
+        self.stage.attestation_requirement = AttestationRequirement.REQUIRED
+        self.stage.save()
+        root_key, root_pem = generate_test_root_ca()
+        challenge, aaguid = os.urandom(32), os.urandom(16)
+        WebAuthnDeviceType.objects.create(
+            aaguid=UUID(bytes=aaguid),
+            description="Attestable",
+            attestation_root_certificates=[root_pem],
+        )
+        self._prepare_plan(challenge)
+        response = self._post_credential(
+            build_synthetic_packed_attestation(aaguid, challenge, root_key, fmt="apple")
+        )
+        self._assert_registration_error(response, self.UNVERIFIABLE_ERROR)
+
+    def test_register_attestation_required_malformed_attestation_object(self):
+        """required: a malformed attestation object is rejected instead of raising"""
+        self.stage.attestation_requirement = AttestationRequirement.REQUIRED
+        self.stage.save()
+        root_key, _root_pem = generate_test_root_ca()
+        challenge, aaguid = os.urandom(32), os.urandom(16)
+        self._prepare_plan(challenge)
+        credential = build_synthetic_packed_attestation(aaguid, challenge, root_key)
+        for malformed in (b64url(b"not cbor"), b64url(encode_cbor({"fmt": "packed"})), 1, ""):
+            credential["response"]["attestationObject"] = malformed
+            response = self._post_credential(credential)
+            self._assert_registration_error(response, self.UNVERIFIABLE_ERROR)
+        credential["response"] = "not a dict"
+        response = self._post_credential(credential)
+        self._assert_registration_error(response, self.UNVERIFIABLE_ERROR)
 
     # --- Key protection ---
 
