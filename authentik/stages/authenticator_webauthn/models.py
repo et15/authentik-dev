@@ -69,6 +69,32 @@ class AuthenticatorAttachment(models.TextChoices):
     CROSS_PLATFORM = "cross-platform"
 
 
+class CredentialBackupEligibility(models.TextChoices):
+    """Policy for whether a WebAuthn credential is allowed to be a "multi-device credential"
+    (i.e. one that can be backed up/synced across devices, such as a passkey stored in
+    iCloud Keychain, Google Password Manager, or a third-party password manager) versus a
+    "single-device credential" that is bound to a single, specific piece of hardware (such
+    as a YubiKey, or a platform authenticator like Windows Hello/Touch ID that has not been
+    enrolled with a cloud-syncing passkey provider).
+
+    This is determined using the Backup Eligibility (BE) flag of the authenticator data,
+    which authenticators set permanently at credential-creation time.
+
+    Members:
+        `ANY`: No restriction is applied based on backup eligibility
+        `REQUIRED`: Only credentials that are eligible for backup/sync (BE=1) may be
+            registered
+        `DENIED`: Only credentials that are *not* eligible for backup/sync (BE=0), i.e.
+            single-device/hardware-bound credentials, may be registered
+
+    https://w3c.github.io/webauthn/#sctn-credential-backup
+    """
+
+    ANY = "any"
+    REQUIRED = "required"
+    DENIED = "denied"
+
+
 class WebAuthnHint(models.TextChoices):
     """Hints to guide the browser in prioritizing the preferred authenticator during
     WebAuthn registration and authentication. Unlike authenticatorAttachment, hints are
@@ -110,6 +136,11 @@ class AuthenticatorWebAuthnStage(ConfigurableStage, FriendlyNamedStage, Stage):
 
     device_type_restrictions = models.ManyToManyField(
         "WebAuthnDeviceType", blank=True, through="AuthenticatorWebAuthnStageDeviceTypeRestriction"
+    )
+
+    backup_eligibility = models.TextField(
+        choices=CredentialBackupEligibility.choices,
+        default=CredentialBackupEligibility.ANY,
     )
 
     max_attempts = models.PositiveIntegerField(default=0)
@@ -168,6 +199,17 @@ class WebAuthnDevice(SerializerModel, Device):
     device_type = models.ForeignKey(
         "WebAuthnDeviceType", on_delete=models.SET_DEFAULT, null=True, default=None
     )
+
+    # Backup Eligibility (BE) flag, captured at registration time. `True` means the
+    # authenticator marked this credential as a multi-device/syncable credential (e.g. a
+    # passkey stored in a cloud keychain or password manager); `False` means it is bound to
+    # a single piece of hardware. `None` for devices registered before this field existed.
+    credential_backup_eligible = models.BooleanField(null=True, default=None)
+    # Backup State (BS) flag, captured at registration time. Reflects whether the credential
+    # was *actually* backed up at that moment. Unlike `credential_backup_eligible`, this can
+    # change over the credential's lifetime, but authentik currently only records the value
+    # observed at registration.
+    credential_backed_up = models.BooleanField(null=True, default=None)
 
     @property
     def descriptor(self) -> PublicKeyCredentialDescriptor:

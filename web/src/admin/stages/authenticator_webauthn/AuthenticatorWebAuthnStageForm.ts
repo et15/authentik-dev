@@ -14,6 +14,7 @@ import { BaseStageForm } from "#admin/stages/BaseStageForm";
 import {
     AuthenticatorAttachmentEnum,
     AuthenticatorWebAuthnStage,
+    BackupEligibilityEnum,
     FlowDesignationEnum,
     StagesApi,
     UserVerificationEnum,
@@ -245,6 +246,42 @@ export class AuthenticatorWebAuthnStageForm extends BaseStageForm<AuthenticatorW
                         <p class="pf-c-form__helper-text">
                             ${msg(
                                 "Optionally restrict which WebAuthn device types may be used. When no device types are selected, all devices are allowed.",
+                            )}
+                        </p>
+                    </ak-form-element-horizontal>
+                    <ak-form-element-horizontal
+                        label=${msg("Backup eligibility")}
+                        required
+                        name="backupEligibility"
+                    >
+                        <ak-radio
+                            .options=${[
+                                {
+                                    label: msg(
+                                        "Any: No restriction based on whether the credential can be backed up or synced.",
+                                    ),
+                                    value: BackupEligibilityEnum.Any,
+                                    default: true,
+                                },
+                                {
+                                    label: msg(
+                                        "Required: Only credentials that can be backed up or synced across devices are allowed.",
+                                    ),
+                                    value: BackupEligibilityEnum.Required,
+                                },
+                                {
+                                    label: msg(
+                                        "Denied: Only credentials bound to a single device are allowed (e.g. a security key, or Windows Hello/Touch ID without cloud sync). Synced passkeys are rejected.",
+                                    ),
+                                    value: BackupEligibilityEnum.Denied,
+                                },
+                            ]}
+                            .value=${this.instance?.backupEligibility}
+                        >
+                        </ak-radio>
+                        <p class="pf-c-form__helper-text">
+                            ${msg(
+                                "Enforced using the WebAuthn Backup Eligibility (BE) flag, which authenticators set permanently when a credential is created. Only applies to newly registered credentials.",
                             )}
                         </p>
                     </ak-form-element-horizontal>

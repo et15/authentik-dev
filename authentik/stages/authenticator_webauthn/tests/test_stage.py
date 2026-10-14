@@ -17,6 +17,7 @@ from authentik.lib.tests.utils import load_fixture
 from authentik.stages.authenticator_webauthn.models import (
     UNKNOWN_DEVICE_TYPE_AAGUID,
     AuthenticatorWebAuthnStage,
+    CredentialBackupEligibility,
     WebAuthnDevice,
     WebAuthnDeviceType,
     WebAuthnHint,
@@ -563,5 +564,206 @@ class TestAuthenticatorWebAuthnStage(FlowTestCase):
             error_message=(
                 "Exceeded maximum attempts. Contact your authentik administrator for help."
             ),
+        )
+        self.assertFalse(WebAuthnDevice.objects.filter(user=self.user).exists())
+
+    # The two fixtures below intentionally cover both ends of the WebAuthn Backup Eligibility
+    # (BE) flag:
+    #   - "fixtures/register.json" carries BE=0/BS=0 (a single-device, hardware-bound
+    #     credential).
+    #   - The inline attestation below carries BE=1/BS=1 (a multi-device, syncable "iCloud
+    #     Keychain" credential, also used by the device-type-restriction tests above).
+
+    def test_register_backup_denied_applies_to_unknown_device_types(self):
+        """backup_eligibility is still enforced when the device type restriction passes via
+        the special "unknown devices" entry (regression: this used to return early)"""
+        webauthn_mds_import.send(force=True)
+        WebAuthnDeviceType.objects.filter(aaguid="fbfc3007-154e-4ecc-8c0b-6e020557d7bd").delete()
+        self.stage.device_type_restrictions.set(
+            WebAuthnDeviceType.objects.filter(aaguid=UNKNOWN_DEVICE_TYPE_AAGUID)
+        )
+        self.stage.backup_eligibility = CredentialBackupEligibility.DENIED
+        self.stage.save()
+        self._prepare_plan(
+            b64decode(
+                b"03Xodi54gKsfnP5I9VFfhaGXVVE2NUyZpBBXns/JI+x6V9RY2Tw2QmxRJkhh7174EkRazUntIwjMVY9bFG60Lw=="
+            )
+        )
+        response = self._post_synced_credential()
+        self.assertEqual(response.status_code, 200)
+        self.assertStageResponse(
+            response,
+            flow=self.flow,
+            component="ak-stage-authenticator-webauthn",
+            response_errors={
+                "response": [
+                    {
+                        "string": (
+                            "This authenticator type is not allowed because it can be "
+                            "backed up or synced to other devices (for example via a "
+                            "cloud keychain or password manager). Please use a "
+                            "hardware-bound authenticator, such as a security key or a "
+                            "device's built-in biometric/PIN authenticator without cloud "
+                            "sync enabled, or contact your authentik administrator for "
+                            "help."
+                        ),
+                        "code": "invalid",
+                    }
+                ]
+            },
+        )
+        self.assertFalse(WebAuthnDevice.objects.filter(user=self.user).exists())
+
+    def _post_synced_credential(self):
+        return self.client.post(
+            reverse("authentik_api:flow-executor", kwargs={"flow_slug": self.flow.slug}),
+            data={
+                "component": "ak-stage-authenticator-webauthn",
+                "response": {
+                    "id": "kqnmrVLnDG-OwsSNHkihYZaNz5s",
+                    "rawId": "kqnmrVLnDG-OwsSNHkihYZaNz5s",
+                    "type": "public-key",
+                    "registrationClientExtensions": "{}",
+                    "response": {
+                        "clientDataJSON": (
+                            "eyJ0eXBlIjoid2ViYXV0aG4uY3JlYXRlIiwiY2hhbGxlbmd"
+                            "lIjoiMDNYb2RpNTRnS3NmblA1STlWRmZoYUdYVlZFMk5VeV"
+                            "pwQkJYbnNfSkkteDZWOVJZMlR3MlFteFJKa2hoNzE3NEVrU"
+                            "mF6VW50SXdqTVZZOWJGRzYwTHciLCJvcmlnaW4iOiJodHRw"
+                            "Oi8vbG9jYWxob3N0OjkwMDAiLCJjcm9zc09yaWdpbiI6ZmFsc2V9"
+                        ),
+                        "attestationObject": (
+                            "o2NmbXRkbm9uZWdhdHRTdG10oGhhdXRoRGF0YViYSZYN5Yg"
+                            "OjGh0NBcPZHZgW4_krrmihjLHmVzzuoMdl2NdAAAAAPv8MA"
+                            "cVTk7MjAtuAgVX170AFJKp5q1S5wxvjsLEjR5IoWGWjc-bp"
+                            "QECAyYgASFYIKtcZHPumH37XHs0IM1v3pUBRIqHVV_SE-Lq"
+                            "2zpJAOVXIlgg74Fg_WdB0kuLYqCKbxogkEPaVtR_iR3IyQFIJAXBzds"
+                        ),
+                    },
+                },
+            },
+            SERVER_NAME="localhost",
+            SERVER_PORT="9000",
+        )
+
+    def _prepare_plan(self, challenge: bytes):
+        plan = FlowPlan(flow_pk=self.flow.pk.hex, bindings=[self.binding], markers=[StageMarker()])
+        plan.context[PLAN_CONTEXT_PENDING_USER] = self.user
+        plan.context[PLAN_CONTEXT_WEBAUTHN_CHALLENGE] = challenge
+        session = self.client.session
+        session[SESSION_KEY_PLAN] = plan
+        session.save()
+
+    def test_register_backup_denied_allows_device_bound(self):
+        """backup_eligibility=denied allows a single-device (BE=0) credential"""
+        self.stage.backup_eligibility = CredentialBackupEligibility.DENIED
+        self.stage.save()
+        self._prepare_plan(
+            b64decode(
+                b"iHIX3AtkZZCxSYLxOhk80ZXI7RnAC0Pb4WTk9dEJ4eLJdzoh8jRmjKW2U9oE/CBn5n6Zj67BIIZvFL3lpiwJwg=="
+            )
+        )
+        response = self.client.post(
+            reverse("authentik_api:flow-executor", kwargs={"flow_slug": self.flow.slug}),
+            data={
+                "component": "ak-stage-authenticator-webauthn",
+                "response": loads(load_fixture("fixtures/register.json")),
+            },
+            SERVER_NAME="localhost",
+            SERVER_PORT="9000",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertStageRedirects(response, reverse("authentik_core:root-redirect"))
+        device = WebAuthnDevice.objects.filter(user=self.user).first()
+        self.assertIsNotNone(device)
+        self.assertFalse(device.credential_backup_eligible)
+        self.assertFalse(device.credential_backed_up)
+
+    def test_register_backup_denied_rejects_synced(self):
+        """backup_eligibility=denied rejects a multi-device (BE=1) credential"""
+        self.stage.backup_eligibility = CredentialBackupEligibility.DENIED
+        self.stage.save()
+        self._prepare_plan(
+            b64decode(
+                b"03Xodi54gKsfnP5I9VFfhaGXVVE2NUyZpBBXns/JI+x6V9RY2Tw2QmxRJkhh7174EkRazUntIwjMVY9bFG60Lw=="
+            )
+        )
+        response = self._post_synced_credential()
+        self.assertEqual(response.status_code, 200)
+        self.assertStageResponse(
+            response,
+            flow=self.flow,
+            component="ak-stage-authenticator-webauthn",
+            response_errors={
+                "response": [
+                    {
+                        "string": (
+                            "This authenticator type is not allowed because it can be "
+                            "backed up or synced to other devices (for example via a "
+                            "cloud keychain or password manager). Please use a "
+                            "hardware-bound authenticator, such as a security key or a "
+                            "device's built-in biometric/PIN authenticator without cloud "
+                            "sync enabled, or contact your authentik administrator for "
+                            "help."
+                        ),
+                        "code": "invalid",
+                    }
+                ]
+            },
+        )
+        self.assertFalse(WebAuthnDevice.objects.filter(user=self.user).exists())
+
+    def test_register_backup_required_allows_synced(self):
+        """backup_eligibility=required allows a multi-device (BE=1) credential"""
+        self.stage.backup_eligibility = CredentialBackupEligibility.REQUIRED
+        self.stage.save()
+        self._prepare_plan(
+            b64decode(
+                b"03Xodi54gKsfnP5I9VFfhaGXVVE2NUyZpBBXns/JI+x6V9RY2Tw2QmxRJkhh7174EkRazUntIwjMVY9bFG60Lw=="
+            )
+        )
+        response = self._post_synced_credential()
+        self.assertEqual(response.status_code, 200)
+        self.assertStageRedirects(response, reverse("authentik_core:root-redirect"))
+        device = WebAuthnDevice.objects.filter(user=self.user).first()
+        self.assertIsNotNone(device)
+        self.assertTrue(device.credential_backup_eligible)
+        self.assertTrue(device.credential_backed_up)
+
+    def test_register_backup_required_rejects_device_bound(self):
+        """backup_eligibility=required rejects a single-device (BE=0) credential"""
+        self.stage.backup_eligibility = CredentialBackupEligibility.REQUIRED
+        self.stage.save()
+        self._prepare_plan(
+            b64decode(
+                b"iHIX3AtkZZCxSYLxOhk80ZXI7RnAC0Pb4WTk9dEJ4eLJdzoh8jRmjKW2U9oE/CBn5n6Zj67BIIZvFL3lpiwJwg=="
+            )
+        )
+        response = self.client.post(
+            reverse("authentik_api:flow-executor", kwargs={"flow_slug": self.flow.slug}),
+            data={
+                "component": "ak-stage-authenticator-webauthn",
+                "response": loads(load_fixture("fixtures/register.json")),
+            },
+            SERVER_NAME="localhost",
+            SERVER_PORT="9000",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertStageResponse(
+            response,
+            flow=self.flow,
+            component="ak-stage-authenticator-webauthn",
+            response_errors={
+                "response": [
+                    {
+                        "string": (
+                            "This authenticator cannot be backed up or synced. Please use "
+                            "a passkey that can be synced across devices, or contact your "
+                            "authentik administrator for help."
+                        ),
+                        "code": "invalid",
+                    }
+                ]
+            },
         )
         self.assertFalse(WebAuthnDevice.objects.filter(user=self.user).exists())

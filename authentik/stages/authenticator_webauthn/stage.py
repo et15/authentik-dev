@@ -19,6 +19,7 @@ from webauthn.helpers.structs import (
     AttestationConveyancePreference,
     AuthenticatorAttachment,
     AuthenticatorSelectionCriteria,
+    CredentialDeviceType,
     PublicKeyCredentialCreationOptions,
     PublicKeyCredentialHint,
     ResidentKeyRequirement,
@@ -42,6 +43,7 @@ from authentik.flows.stage import ChallengeStageView
 from authentik.stages.authenticator_webauthn.models import (
     UNKNOWN_DEVICE_TYPE_AAGUID,
     AuthenticatorWebAuthnStage,
+    CredentialBackupEligibility,
     WebAuthnDevice,
     WebAuthnDeviceType,
 )
@@ -125,16 +127,59 @@ class AuthenticatorWebAuthnChallengeResponse(ChallengeResponse):
             # If there are any restrictions set and we didn't get an aaguid, invalid
             if not aaguid:
                 raise invalid_error
-            # If one of the restrictions is the "special" unknown device type UUID
-            # but we do have a device type for the given aaguid, invalid
-            if (
+            # If one of the restrictions is the "special" unknown device type UUID and we
+            # don't have a device type for the given aaguid, the device type check passes.
+            # This must not return early: the checks below (backup eligibility, ...) still
+            # have to be applied to such devices.
+            unknown_device_allowed = (
                 UUID(UNKNOWN_DEVICE_TYPE_AAGUID) in allowed_aaguids
                 and not WebAuthnDeviceType.objects.filter(aaguid=aaguid).exists()
-            ):
-                return registration_data
+            )
             # Otherwise just check if the given aaguid is in the allowed aaguids
-            if UUID(aaguid) not in allowed_aaguids:
+            if not unknown_device_allowed and UUID(aaguid) not in allowed_aaguids:
                 raise invalid_error
+
+        if stage.backup_eligibility != CredentialBackupEligibility.ANY:
+            # The Backup Eligibility (BE) flag is set by the authenticator at credential
+            # creation time and is permanent for the credential's lifetime. It indicates
+            # whether the credential *can* be backed up/synced across devices (a "multi
+            # device credential", e.g. a passkey in a cloud keychain or password manager)
+            # as opposed to being bound to a single piece of hardware (a "single device
+            # credential", e.g. a security key or a platform authenticator that hasn't
+            # been enrolled with a syncing passkey provider).
+            # https://w3c.github.io/webauthn/#sctn-credential-backup
+            is_backup_eligible = (
+                registration.credential_device_type == CredentialDeviceType.MULTI_DEVICE
+            )
+            if (
+                stage.backup_eligibility == CredentialBackupEligibility.REQUIRED
+                and not is_backup_eligible
+            ):
+                raise ValidationError(
+                    _(
+                        "This authenticator cannot be backed up or synced. Please use a "
+                        "passkey that can be synced across devices, or contact your "
+                        "{brand} administrator for help.".format(
+                            brand=self.stage.request.brand.branding_title
+                        )
+                    )
+                )
+            if (
+                stage.backup_eligibility == CredentialBackupEligibility.DENIED
+                and is_backup_eligible
+            ):
+                raise ValidationError(
+                    _(
+                        "This authenticator type is not allowed because it can be backed "
+                        "up or synced to other devices (for example via a cloud keychain "
+                        "or password manager). Please use a hardware-bound authenticator, "
+                        "such as a security key or a device's built-in biometric/PIN "
+                        "authenticator without cloud sync enabled, or contact your "
+                        "{brand} administrator for help.".format(
+                            brand=self.stage.request.brand.branding_title
+                        )
+                    )
+                )
         return registration_data
 
 
@@ -236,5 +281,10 @@ class AuthenticatorWebAuthnStageView(ChallengeStageView):
             aaguid=webauthn_credential.registration.aaguid,
             attestation_certificate_pem=webauthn_credential.attest_cert,
             attestation_certificate_fingerprint=webauthn_credential.attest_cert_fingerprint,
+            credential_backup_eligible=(
+                webauthn_credential.registration.credential_device_type
+                == CredentialDeviceType.MULTI_DEVICE
+            ),
+            credential_backed_up=webauthn_credential.registration.credential_backed_up,
         )
         return self.executor.stage_ok()

@@ -22,6 +22,7 @@ Enrolled authenticators can later be used with the [Authenticator Validation sta
 - **Authenticator Attachment**: restrict enrollment to platform authenticators, cross-platform authenticators, or leave it unrestricted.
 - **Hints**: browser hints that influence which authenticator is preferred during enrollment.
 - **Device type restrictions**: limit enrollment to specific WebAuthn device types.
+- **Backup eligibility**: restrict enrollment based on whether the credential can be backed up or synced across devices.
 - **Maximum registration attempts**: maximum number of failed registration attempts before the stage denies access. A value of `0` disables the limit.
 - **Authenticator type name**: optional friendly name shown to the user in self-service settings.
 - **Configuration flow**: optional authenticated flow that lets users enroll this authenticator from user settings.
@@ -89,3 +90,24 @@ The available device-type entries are populated from the [FIDO Alliance Metadata
 If you select specific device types, newly added metadata entries are not allowed automatically. Review this allowlist after authentik upgrades if your compliance policy should include newly recognized authenticators.
 
 authentik also includes the special device-type `authentik: Unknown devices`. Select it only when you want to allow authenticators that return an AAGUID that is not present in authentik's device-type metadata. Authenticators that do not return an AAGUID cannot satisfy a device-type restriction.
+
+### Backup eligibility
+
+**Backup eligibility** restricts registration based on the WebAuthn **Backup Eligibility (BE)** flag, which an authenticator sets permanently when a credential is created. This flag distinguishes:
+
+- A **single-device credential** (BE = 0): bound to one specific piece of hardware, such as a security key, or a platform authenticator (like Windows Hello or Touch ID) that has not been enrolled with a cloud-syncing passkey provider.
+- A **multi-device credential** (BE = 1): eligible to be backed up or synced across devices, such as a passkey stored in iCloud Keychain, Google Password Manager, or a third-party password manager.
+
+Options:
+
+- **Any** (default): no restriction is applied. This matches the behavior prior to this option's introduction.
+- **Required**: only credentials that are eligible for backup/sync are allowed to register. Use this to require passkeys that survive device loss.
+- **Denied**: only credentials that are *not* eligible for backup/sync are allowed to register. Use this to require hardware-bound authenticators (security keys, or a device's local biometric/PIN authenticator) and reject synced passkeys and password-manager-backed credentials.
+
+:::info
+Unlike **Authenticator attachment**, which only distinguishes *platform* (built into the device) from *cross-platform* (removable) authenticators, **Backup eligibility** distinguishes whether a credential's private key can leave the device it was created on. A platform authenticator can be either: Windows Hello and Touch ID are typically single-device credentials, while an OS-level passkey enrolled with iCloud Keychain or Google Password Manager is a multi-device credential, even though both present as "platform" authenticators to the browser. Combine **Authenticator attachment: Platform** with **Backup eligibility: Denied** to allow only device-bound platform authenticators (Windows Hello, Touch ID, Android StrongBox) while still rejecting cross-platform security keys and any synced passkey.
+:::
+
+:::info
+Backup eligibility is only checked at registration time, and only stored on newly-registered credentials (requires a version of authentik with this option available; check the release notes for the exact version). It is not re-checked on subsequent logins, so a credential that later becomes eligible for backup (for example, if an authenticator vendor changes its sync behavior) is not automatically re-evaluated. Existing credentials enrolled before this option was added are not retroactively restricted.
+:::
