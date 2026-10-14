@@ -27,6 +27,7 @@ class AuthenticatorWebAuthnStageSerializer(StageSerializer):
             "device_type_restrictions",
             "device_type_restrictions_obj",
             "backup_eligibility",
+            "attestation_requirement",
             "max_attempts",
         ]
 
@@ -44,6 +45,7 @@ class AuthenticatorWebAuthnStageViewSet(UsedByMixin, ModelViewSet):
         "resident_key_requirement",
         "device_type_restrictions",
         "backup_eligibility",
+        "attestation_requirement",
         "max_attempts",
     ]
     ordering = ["name"]

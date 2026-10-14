@@ -22,6 +22,7 @@ Enrolled authenticators can later be used with the [Authenticator Validation sta
 - **Authenticator Attachment**: restrict enrollment to platform authenticators, cross-platform authenticators, or leave it unrestricted.
 - **Hints**: browser hints that influence which authenticator is preferred during enrollment.
 - **Device type restrictions**: limit enrollment to specific WebAuthn device types.
+- **Attestation requirement**: require cryptographic proof of an authenticator's claimed device identity.
 - **Backup eligibility**: restrict enrollment based on whether the credential can be backed up or synced across devices.
 - **Maximum registration attempts**: maximum number of failed registration attempts before the stage denies access. A value of `0` disables the limit.
 - **Authenticator type name**: optional friendly name shown to the user in self-service settings.
@@ -110,4 +111,26 @@ Unlike **Authenticator attachment**, which only distinguishes *platform* (built 
 
 :::info
 Backup eligibility is only checked at registration time, and only stored on newly-registered credentials (requires a version of authentik with this option available; check the release notes for the exact version). It is not re-checked on subsequent logins, so a credential that later becomes eligible for backup (for example, if an authenticator vendor changes its sync behavior) is not automatically re-evaluated. Existing credentials enrolled before this option was added are not retroactively restricted.
+:::
+
+:::caution
+BE is a value reported by the authenticator. It is covered by the attestation/assertion signature, but nothing proves it is truthful. It also does **not** tell you whether the key lives in a security chip; see **Key protection**.
+:::
+
+### Attestation requirement
+
+By default, authentik trusts the AAGUID (device model identifier) an authenticator reports without cryptographic proof; nothing in the protocol stops a client from claiming an arbitrary AAGUID. **Attestation requirement: Required** closes this gap:
+
+- The authenticator must return a full attestation statement (not `none`) with a certificate chain for its attestation key.
+- Its claimed AAGUID must exist in authentik's FIDO Metadata Service data (kept current by the `webauthn_mds_import` task) with at least one published trusted root certificate.
+- The certificate chain must validate against one of those roots.
+
+Registration is rejected if any of these fail.
+
+:::info
+This proves the manufacturer identity of the authenticator; it does not restrict *which* authenticators are allowed. Combine it with **Device type restrictions** or **Key protection** to define policy.
+:::
+
+:::caution
+Requiring attestation rejects authenticators whose manufacturer does not participate in the FIDO Metadata Service, or that authentik's bundled metadata snapshot does not yet contain. Test with your users' actual hardware before enforcing it broadly.
 :::

@@ -12,6 +12,7 @@ import { deviceTypeRestrictionPair } from "#admin/stages/authenticator_webauthn/
 import { BaseStageForm } from "#admin/stages/BaseStageForm";
 
 import {
+    AttestationRequirementEnum,
     AuthenticatorAttachmentEnum,
     AuthenticatorWebAuthnStage,
     BackupEligibilityEnum,
@@ -246,6 +247,36 @@ export class AuthenticatorWebAuthnStageForm extends BaseStageForm<AuthenticatorW
                         <p class="pf-c-form__helper-text">
                             ${msg(
                                 "Optionally restrict which WebAuthn device types may be used. When no device types are selected, all devices are allowed.",
+                            )}
+                        </p>
+                    </ak-form-element-horizontal>
+                    <ak-form-element-horizontal
+                        label=${msg("Attestation requirement")}
+                        required
+                        name="attestationRequirement"
+                    >
+                        <ak-radio
+                            .options=${[
+                                {
+                                    label: msg(
+                                        "Not required: The AAGUID an authenticator reports is trusted as-is, without cryptographic proof.",
+                                    ),
+                                    value: AttestationRequirementEnum.NotRequired,
+                                    default: true,
+                                },
+                                {
+                                    label: msg(
+                                        "Required: The authenticator must provide a full attestation statement whose certificate chain validates against a trusted manufacturer root for its claimed AAGUID (from the FIDO Metadata Service). Unrecognized or unattested authenticators are rejected.",
+                                    ),
+                                    value: AttestationRequirementEnum.Required,
+                                },
+                            ]}
+                            .value=${this.instance?.attestationRequirement}
+                        >
+                        </ak-radio>
+                        <p class="pf-c-form__helper-text">
+                            ${msg(
+                                "Required for security-level restrictions such as key protection to be trustworthy, since they rely on the AAGUID being cryptographically verified rather than self-reported.",
                             )}
                         </p>
                     </ak-form-element-horizontal>

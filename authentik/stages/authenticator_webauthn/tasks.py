@@ -4,11 +4,13 @@ from functools import lru_cache
 from json import loads
 from pathlib import Path
 
+from cryptography.hazmat.primitives.serialization import Encoding
+from cryptography.x509 import load_der_x509_certificate
 from django.core.cache import cache
 from django.db.transaction import atomic
 from django.utils.translation import gettext_lazy as _
 from dramatiq.actor import actor
-from fido2.mds3 import filter_revoked, parse_blob
+from fido2.mds3 import MetadataBlobPayloadEntry, filter_revoked, parse_blob
 
 from authentik.stages.authenticator_webauthn.models import (
     UNKNOWN_DEVICE_TYPE_AAGUID,
@@ -16,7 +18,14 @@ from authentik.stages.authenticator_webauthn.models import (
 )
 from authentik.tasks.middleware import CurrentTask
 
-CACHE_KEY_MDS_NO = "goauthentik.io/stages/authenticator_webauthn/mds_no"
+CACHE_KEY_MDS_NO_PREFIX = "goauthentik.io/stages/authenticator_webauthn/mds_no"
+# The import is skipped while the cached blob number matches the bundled blob. Bump this
+# whenever the import starts persisting additional data: it changes the cache key, so blobs
+# that were already imported by an older version are imported again after an upgrade.
+#   1 (unversioned key): description, icon
+#   2: + attestation_root_certificates
+MDS_IMPORT_VERSION = 2
+CACHE_KEY_MDS_NO = f"{CACHE_KEY_MDS_NO_PREFIX}/v{MDS_IMPORT_VERSION}"
 AAGUID_BLOB_PATH = Path(__file__).parent / "mds" / "aaguid.json"
 MDS_BLOB_PATH = Path(__file__).parent / "mds" / "blob.jwt"
 MDS_CA_PATH = Path(__file__).parent / "mds" / "root-r3.crt"
@@ -27,6 +36,19 @@ def mds_ca() -> bytes:
     """Cache MDS Signature CA, GlobalSign Root CA - R3"""
     with open(MDS_CA_PATH, mode="rb") as _raw_root:
         return _raw_root.read()
+
+
+def _root_certs_as_pem(entry: MetadataBlobPayloadEntry) -> list[str]:
+    """Convert an MDS entry's DER-encoded attestation root certificates (if any) to PEM,
+    skipping any certificate that fails to parse rather than discarding the whole entry."""
+    pem_certs = []
+    for der_cert in entry.metadata_statement.attestation_root_certificates or []:
+        try:
+            cert = load_der_x509_certificate(der_cert)
+        except ValueError:
+            continue
+        pem_certs.append(cert.public_bytes(encoding=Encoding.PEM).decode("utf-8"))
+    return pem_certs
 
 
 @actor(description=_("Background task to import FIDO Alliance MDS blob and AAGUIDs into database."))
@@ -58,13 +80,14 @@ def webauthn_mds_import(force=False):
                     aaguid=str(aaguid),
                     description=metadata.description,
                     icon=metadata.icon,
+                    attestation_root_certificates=_root_certs_as_pem(entry),
                 )
             )
     with atomic():
         WebAuthnDeviceType.objects.bulk_create(
             to_create_update,
             update_conflicts=True,
-            update_fields=["description", "icon"],
+            update_fields=["description", "icon", "attestation_root_certificates"],
             unique_fields=["aaguid"],
         )
         WebAuthnDeviceType.objects.filter(aaguid__in=to_delete).delete()

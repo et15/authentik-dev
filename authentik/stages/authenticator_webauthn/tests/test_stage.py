@@ -1,10 +1,14 @@
 """Test WebAuthn API"""
 
-from base64 import b64decode
+import os
+from base64 import b64decode, urlsafe_b64decode
 from json import loads
+from uuid import UUID
 
 from django.urls import reverse
 from webauthn.helpers.bytes_to_base64url import bytes_to_base64url
+from webauthn.helpers.encode_cbor import encode_cbor
+from webauthn.helpers.parse_cbor import parse_cbor
 
 from authentik.core.tests.utils import create_test_admin_user, create_test_flow, create_test_user
 from authentik.flows.markers import StageMarker
@@ -16,6 +20,7 @@ from authentik.lib.generators import generate_id
 from authentik.lib.tests.utils import load_fixture
 from authentik.stages.authenticator_webauthn.models import (
     UNKNOWN_DEVICE_TYPE_AAGUID,
+    AttestationRequirement,
     AuthenticatorWebAuthnStage,
     CredentialBackupEligibility,
     WebAuthnDevice,
@@ -24,6 +29,11 @@ from authentik.stages.authenticator_webauthn.models import (
 )
 from authentik.stages.authenticator_webauthn.stage import PLAN_CONTEXT_WEBAUTHN_CHALLENGE
 from authentik.stages.authenticator_webauthn.tasks import webauthn_mds_import
+from authentik.stages.authenticator_webauthn.tests.synthetic import (
+    b64url,
+    build_synthetic_packed_attestation,
+    generate_test_root_ca,
+)
 
 
 class TestAuthenticatorWebAuthnStage(FlowTestCase):
@@ -767,3 +777,139 @@ class TestAuthenticatorWebAuthnStage(FlowTestCase):
             },
         )
         self.assertFalse(WebAuthnDevice.objects.filter(user=self.user).exists())
+
+    # --- Attestation requirement ---
+
+    def _post_credential(self, credential: dict):
+        return self.client.post(
+            reverse("authentik_api:flow-executor", kwargs={"flow_slug": self.flow.slug}),
+            data={"component": "ak-stage-authenticator-webauthn", "response": credential},
+            SERVER_NAME="localhost",
+            SERVER_PORT="9000",
+        )
+
+    def _assert_registration_error(self, response, message: str):
+        self.assertEqual(response.status_code, 200)
+        self.assertStageResponse(
+            response,
+            flow=self.flow,
+            component="ak-stage-authenticator-webauthn",
+            response_errors={"response": [{"string": message, "code": "invalid"}]},
+        )
+        self.assertFalse(WebAuthnDevice.objects.filter(user=self.user).exists())
+
+    def test_register_attestation_not_required_default(self):
+        """Default (not_required): a self-consistent credential registers without any trust
+        anchor being known for its AAGUID (historical behavior)"""
+        root_key, _root_pem = generate_test_root_ca()
+        challenge, aaguid = os.urandom(32), os.urandom(16)
+        self._prepare_plan(challenge)
+        response = self._post_credential(
+            build_synthetic_packed_attestation(aaguid, challenge, root_key)
+        )
+        self.assertStageRedirects(response, reverse("authentik_core:root-redirect"))
+        self.assertTrue(WebAuthnDevice.objects.filter(user=self.user).exists())
+
+    def test_register_attestation_required_unknown_device_type(self):
+        """required: reject when the AAGUID has no known device type (no trust anchor)"""
+        self.stage.attestation_requirement = AttestationRequirement.REQUIRED
+        self.stage.save()
+        root_key, _root_pem = generate_test_root_ca()
+        challenge, aaguid = os.urandom(32), os.urandom(16)
+        self._prepare_plan(challenge)
+        response = self._post_credential(
+            build_synthetic_packed_attestation(aaguid, challenge, root_key)
+        )
+        self._assert_registration_error(
+            response,
+            (
+                "This authenticator's security level could not be verified. Please use a "
+                "different authenticator, or contact your authentik administrator for help."
+            ),
+        )
+
+    def test_register_attestation_required_no_roots(self):
+        """required: reject when the device type is known but has no trust anchors"""
+        self.stage.attestation_requirement = AttestationRequirement.REQUIRED
+        self.stage.save()
+        root_key, _root_pem = generate_test_root_ca()
+        challenge, aaguid = os.urandom(32), os.urandom(16)
+        WebAuthnDeviceType.objects.create(aaguid=UUID(bytes=aaguid), description="No roots")
+        self._prepare_plan(challenge)
+        response = self._post_credential(
+            build_synthetic_packed_attestation(aaguid, challenge, root_key)
+        )
+        self._assert_registration_error(
+            response,
+            (
+                "This authenticator's security level could not be verified. Please use a "
+                "different authenticator, or contact your authentik administrator for help."
+            ),
+        )
+
+    def test_register_attestation_required_chain_valid(self):
+        """required: accept when the chain validates against the AAGUID's stored root"""
+        self.stage.attestation_requirement = AttestationRequirement.REQUIRED
+        self.stage.save()
+        root_key, root_pem = generate_test_root_ca()
+        challenge, aaguid = os.urandom(32), os.urandom(16)
+        WebAuthnDeviceType.objects.create(
+            aaguid=UUID(bytes=aaguid),
+            description="Attestable",
+            attestation_root_certificates=[root_pem],
+        )
+        self._prepare_plan(challenge)
+        response = self._post_credential(
+            build_synthetic_packed_attestation(aaguid, challenge, root_key)
+        )
+        self.assertStageRedirects(response, reverse("authentik_core:root-redirect"))
+        self.assertTrue(WebAuthnDevice.objects.filter(user=self.user).exists())
+
+    def test_register_attestation_required_chain_invalid(self):
+        """required: reject when the leaf was NOT issued by the root stored for the claimed
+        AAGUID (i.e. a spoofed AAGUID claim, signed by some other CA)"""
+        self.stage.attestation_requirement = AttestationRequirement.REQUIRED
+        self.stage.save()
+        attacker_key, _attacker_pem = generate_test_root_ca()
+        _real_key, real_pem = generate_test_root_ca()
+        challenge, aaguid = os.urandom(32), os.urandom(16)
+        WebAuthnDeviceType.objects.create(
+            aaguid=UUID(bytes=aaguid),
+            description="Attestable",
+            attestation_root_certificates=[real_pem],
+        )
+        self._prepare_plan(challenge)
+        response = self._post_credential(
+            build_synthetic_packed_attestation(aaguid, challenge, attacker_key)
+        )
+        self._assert_registration_error(
+            response,
+            (
+                "This authenticator's attestation could not be verified against a trusted "
+                "certificate. Contact your authentik administrator for help."
+            ),
+        )
+
+    def test_register_attestation_required_none_format(self):
+        """required: reject credentials that carry no attestation statement ("none")"""
+        self.stage.attestation_requirement = AttestationRequirement.REQUIRED
+        self.stage.save()
+        credential = loads(load_fixture("fixtures/register.json"))
+        raw = credential["response"]["attestationObject"]
+        att_obj = parse_cbor(urlsafe_b64decode(raw + "=" * (-len(raw) % 4)))
+        credential["response"]["attestationObject"] = b64url(
+            encode_cbor({"fmt": "none", "attStmt": {}, "authData": att_obj["authData"]})
+        )
+        self._prepare_plan(
+            b64decode(
+                b"iHIX3AtkZZCxSYLxOhk80ZXI7RnAC0Pb4WTk9dEJ4eLJdzoh8jRmjKW2U9oE/CBn5n6Zj67BIIZvFL3lpiwJwg=="
+            )
+        )
+        response = self._post_credential(credential)
+        self._assert_registration_error(
+            response,
+            (
+                "This authenticator's security level could not be verified. Please use a "
+                "different authenticator, or contact your authentik administrator for help."
+            ),
+        )

@@ -21,5 +21,9 @@ class AuthentikStageAuthenticatorWebAuthnConfig(ManagedAppConfig):
             ScheduleSpec(
                 actor=webauthn_mds_import,
                 crontab=f"{fqdn_rand('webauthn_mds_import')} {fqdn_rand('webauthn_mds_import', 24)} * * {fqdn_rand('webauthn_mds_import', 7)}",  # noqa: E501
+                # Also run after startup so that data introduced by an upgrade (see
+                # MDS_IMPORT_VERSION) is available right away instead of after the next
+                # weekly run. Cheap when nothing changed: the import skips unchanged blobs.
+                send_on_startup=True,
             ),
         ]

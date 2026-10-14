@@ -113,6 +113,30 @@ class WebAuthnHint(models.TextChoices):
     HYBRID = "hybrid"
 
 
+class AttestationRequirement(models.TextChoices):
+    """Policy for whether a credential's attestation statement must be cryptographically
+    validated against a trusted manufacturer root certificate before registration is
+    accepted.
+
+    Attestation ties a credential's claimed AAGUID to a certificate chain rooted in a CA
+    that the FIDO Alliance has vetted for that manufacturer. Without this check, an
+    authenticator's self-reported AAGUID (and by extension its FIDO Metadata Service entry,
+    including `key_protection`) cannot be trusted, since nothing stops a client from
+    claiming an arbitrary AAGUID.
+
+    Members:
+        `NOT_REQUIRED`: Attestation is not validated. The AAGUID reported by the
+            authenticator is used as-is, without cryptographic proof (historical behavior).
+        `REQUIRED`: The authenticator must provide a full (non-"none") attestation
+            statement, its AAGUID must be a known entry in authentik's FIDO Metadata
+            Service data with at least one trusted root certificate, and that certificate
+            chain must successfully validate. Registration is rejected otherwise.
+    """
+
+    NOT_REQUIRED = "not_required"
+    REQUIRED = "required"
+
+
 class AuthenticatorWebAuthnStage(ConfigurableStage, FriendlyNamedStage, Stage):
     """Setup WebAuthn-based authentication for the user."""
 
@@ -141,6 +165,11 @@ class AuthenticatorWebAuthnStage(ConfigurableStage, FriendlyNamedStage, Stage):
     backup_eligibility = models.TextField(
         choices=CredentialBackupEligibility.choices,
         default=CredentialBackupEligibility.ANY,
+    )
+
+    attestation_requirement = models.TextField(
+        choices=AttestationRequirement.choices,
+        default=AttestationRequirement.NOT_REQUIRED,
     )
 
     max_attempts = models.PositiveIntegerField(default=0)
@@ -249,6 +278,13 @@ class WebAuthnDeviceType(InternallyManagedMixin, SerializerModel):
 
     description = models.TextField()
     icon = models.TextField(null=True)
+
+    # PEM-encoded root certificates from this device's FIDO Metadata Service metadata
+    # statement (`attestationRootCertificates`). An authenticator's attestation statement
+    # is only considered trustworthy for this AAGUID if its certificate chain validates
+    # against one of these roots. Empty for device types without an attestation root (e.g.
+    # surrogate/self attestation only) or for entries from the supplementary AAGUID list.
+    attestation_root_certificates = models.JSONField(default=list, blank=True)
 
     @property
     def serializer(self) -> Serializer:

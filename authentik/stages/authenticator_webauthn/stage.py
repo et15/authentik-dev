@@ -1,5 +1,6 @@
 """WebAuthn stage"""
 
+from base64 import urlsafe_b64decode
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -12,11 +13,12 @@ from django.utils.translation import gettext_lazy as _
 from rest_framework.fields import CharField
 from rest_framework.serializers import ValidationError
 from webauthn.helpers.bytes_to_base64url import bytes_to_base64url
-from webauthn.helpers.exceptions import WebAuthnException
+from webauthn.helpers.exceptions import InvalidAttestationObjectStructure, WebAuthnException
 from webauthn.helpers.options_to_json_dict import options_to_json_dict
 from webauthn.helpers.parse_attestation_object import parse_attestation_object
 from webauthn.helpers.structs import (
     AttestationConveyancePreference,
+    AttestationFormat,
     AuthenticatorAttachment,
     AuthenticatorSelectionCriteria,
     CredentialDeviceType,
@@ -42,6 +44,7 @@ from authentik.flows.challenge import (
 from authentik.flows.stage import ChallengeStageView
 from authentik.stages.authenticator_webauthn.models import (
     UNKNOWN_DEVICE_TYPE_AAGUID,
+    AttestationRequirement,
     AuthenticatorWebAuthnStage,
     CredentialBackupEligibility,
     WebAuthnDevice,
@@ -58,6 +61,11 @@ class VerifiedRegistrationData:
     registration: VerifiedRegistration
     attest_cert: str | None = None
     attest_cert_fingerprint: str | None = None
+    # True only if the credential's attestation statement was successfully validated against
+    # a trusted manufacturer root certificate stored for its claimed AAGUID. Anything that
+    # wants to rely on AAGUID-derived metadata (e.g. WebAuthnDeviceType.key_protection) as a
+    # security signal rather than a display hint must check this first.
+    attestation_trusted: bool = False
 
 
 class AuthenticatorWebAuthnChallenge(WithUserInfoChallenge):
@@ -76,9 +84,61 @@ class AuthenticatorWebAuthnChallengeResponse(ChallengeResponse):
     request: HttpRequest
     user: User
 
+    def _get_pre_attestation(self, response: dict):
+        """Parse the raw, not-yet-verified attestationObject to read its format and claimed
+        AAGUID *before* calling verify_registration_response, so the right per-AAGUID trust
+        anchors can be supplied to that call. Verifies nothing by itself."""
+        raw_attestation_object = (response.get("response") or {}).get("attestationObject")
+        if not raw_attestation_object:
+            return None
+        padded = raw_attestation_object + "=" * (-len(raw_attestation_object) % 4)
+        try:
+            return parse_attestation_object(urlsafe_b64decode(padded))
+        except InvalidAttestationObjectStructure, ValueError:
+            return None
+
+    def _trusted_roots_for_attestation(
+        self, response: dict
+    ) -> dict[AttestationFormat, list[bytes]]:
+        """Resolve the trusted root certificates (PEM bytes) that this registration's
+        attestation chain must validate against, based on the claimed AAGUID's FIDO MDS
+        entry. Raises ValidationError if attestation cannot be satisfied at all (no
+        attestation given, unknown AAGUID, or no trust anchor available for it)."""
+        unverifiable_error = ValidationError(
+            _(
+                "This authenticator's security level could not be verified. Please use a "
+                "different authenticator, or contact your {brand} administrator for "
+                "help.".format(brand=self.stage.request.brand.branding_title)
+            )
+        )
+        pre_att_obj = self._get_pre_attestation(response)
+        if pre_att_obj is None or pre_att_obj.fmt == AttestationFormat.NONE:
+            raise unverifiable_error
+        attested = pre_att_obj.auth_data.attested_credential_data
+        if not attested or not attested.aaguid:
+            raise unverifiable_error
+        device_type = WebAuthnDeviceType.objects.filter(aaguid=UUID(bytes=attested.aaguid)).first()
+        if not device_type or not device_type.attestation_root_certificates:
+            raise unverifiable_error
+        return {
+            pre_att_obj.fmt: [
+                pem.encode("utf-8") for pem in device_type.attestation_root_certificates
+            ]
+        }
+
+    def _attestation_enforced(self, stage: AuthenticatorWebAuthnStage) -> bool:
+        """Whether attestation chain validation must be performed for this stage."""
+        return stage.attestation_requirement == AttestationRequirement.REQUIRED
+
     def validate_response(self, response: dict) -> VerifiedRegistrationData:
         """Validate webauthn challenge response"""
         challenge = self.stage.executor.plan.context[PLAN_CONTEXT_WEBAUTHN_CHALLENGE]
+        stage: AuthenticatorWebAuthnStage = self.stage.executor.current_stage
+
+        pem_root_certs_bytes_by_fmt = None
+        if self._attestation_enforced(stage):
+            # Raises ValidationError itself if attestation can't be satisfied
+            pem_root_certs_bytes_by_fmt = self._trusted_roots_for_attestation(response)
 
         try:
             registration: VerifiedRegistration = verify_registration_response(
@@ -86,15 +146,25 @@ class AuthenticatorWebAuthnChallengeResponse(ChallengeResponse):
                 expected_challenge=challenge,
                 expected_rp_id=get_rp_id(self.request),
                 expected_origin=get_origin(self.request),
+                pem_root_certs_bytes_by_fmt=pem_root_certs_bytes_by_fmt,
             )
         except WebAuthnException as exc:
             self.stage.logger.warning("registration failed", exc=exc)
+            if pem_root_certs_bytes_by_fmt:
+                raise ValidationError(
+                    _(
+                        "This authenticator's attestation could not be verified against a "
+                        "trusted certificate. Contact your {brand} administrator for "
+                        "help.".format(brand=self.stage.request.brand.branding_title)
+                    )
+                ) from None
             raise ValidationError(
                 "Registration failed. Please contact your administrator."
             ) from None
 
-        registration_data = VerifiedRegistrationData(registration)
-        stage: AuthenticatorWebAuthnStage = self.stage.executor.current_stage
+        registration_data = VerifiedRegistrationData(
+            registration, attestation_trusted=bool(pem_root_certs_bytes_by_fmt)
+        )
 
         att_obj = parse_attestation_object(registration.attestation_object)
         if (
