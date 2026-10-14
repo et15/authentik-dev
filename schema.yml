@@ -30569,11 +30569,19 @@ paths:
       description: AuthenticatorWebAuthnStage Viewset
       parameters:
       - in: query
+        name: attestation_requirement
+        schema:
+          $ref: '#/components/schemas/AttestationRequirementEnum'
+      - in: query
         name: authenticator_attachment
         schema:
           allOf:
           - $ref: '#/components/schemas/AuthenticatorAttachmentEnum'
           nullable: true
+      - in: query
+        name: backup_eligibility
+        schema:
+          $ref: '#/components/schemas/BackupEligibilityEnum'
       - in: query
         name: configure_flow
         schema:
@@ -30588,6 +30596,10 @@ paths:
             format: uuid
         explode: true
         style: form
+      - in: query
+        name: key_protection_match_mode
+        schema:
+          $ref: '#/components/schemas/KeyProtectionMatchModeEnum'
       - in: query
         name: max_attempts
         schema:
@@ -36102,6 +36114,11 @@ components:
       required:
       - name
       - slug
+    AttestationRequirementEnum:
+      enum:
+      - not_required
+      - required
+      type: string
     AuthTypeEnum:
       enum:
       - basic
@@ -37358,6 +37375,16 @@ components:
           items:
             $ref: '#/components/schemas/WebAuthnDeviceType'
           readOnly: true
+        backup_eligibility:
+          $ref: '#/components/schemas/BackupEligibilityEnum'
+        attestation_requirement:
+          $ref: '#/components/schemas/AttestationRequirementEnum'
+        key_protection_types:
+          type: array
+          items:
+            $ref: '#/components/schemas/KeyProtectionTypesEnum'
+        key_protection_match_mode:
+          $ref: '#/components/schemas/KeyProtectionMatchModeEnum'
         max_attempts:
           type: integer
           maximum: 2147483647
@@ -37403,6 +37430,16 @@ components:
           items:
             type: string
             format: uuid
+        backup_eligibility:
+          $ref: '#/components/schemas/BackupEligibilityEnum'
+        attestation_requirement:
+          $ref: '#/components/schemas/AttestationRequirementEnum'
+        key_protection_types:
+          type: array
+          items:
+            $ref: '#/components/schemas/KeyProtectionTypesEnum'
+        key_protection_match_mode:
+          $ref: '#/components/schemas/KeyProtectionMatchModeEnum'
         max_attempts:
           type: integer
           maximum: 2147483647
@@ -37457,6 +37494,12 @@ components:
       - authentik.core.auth.TokenBackend
       - authentik.sources.ldap.auth.LDAPBackend
       - authentik.sources.kerberos.auth.KerberosBackend
+      type: string
+    BackupEligibilityEnum:
+      enum:
+      - any
+      - required
+      - denied
       type: string
     BindingTypeEnum:
       enum:
@@ -43490,6 +43533,19 @@ components:
       - name
       - realm
       - slug
+    KeyProtectionMatchModeEnum:
+      enum:
+      - any
+      - all
+      type: string
+    KeyProtectionTypesEnum:
+      enum:
+      - software
+      - hardware
+      - tee
+      - secure_element
+      - remote_handle
+      type: string
     KeyTypeEnum:
       type: string
       enum:
@@ -50272,6 +50328,16 @@ components:
           items:
             type: string
             format: uuid
+        backup_eligibility:
+          $ref: '#/components/schemas/BackupEligibilityEnum'
+        attestation_requirement:
+          $ref: '#/components/schemas/AttestationRequirementEnum'
+        key_protection_types:
+          type: array
+          items:
+            $ref: '#/components/schemas/KeyProtectionTypesEnum'
+        key_protection_match_mode:
+          $ref: '#/components/schemas/KeyProtectionMatchModeEnum'
         max_attempts:
           type: integer
           maximum: 2147483647
@@ -61772,9 +61838,19 @@ components:
           allOf:
           - $ref: '#/components/schemas/PartialUser'
           readOnly: true
+        credential_backup_eligible:
+          type: boolean
+          readOnly: true
+          nullable: true
+        credential_backed_up:
+          type: boolean
+          readOnly: true
+          nullable: true
       required:
       - aaguid
       - created_on
+      - credential_backed_up
+      - credential_backup_eligible
       - device_type
       - name
       - pk

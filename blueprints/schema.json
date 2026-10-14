@@ -17259,6 +17259,46 @@
                     },
                     "title": "Device type restrictions"
                 },
+                "backup_eligibility": {
+                    "type": "string",
+                    "enum": [
+                        "any",
+                        "required",
+                        "denied"
+                    ],
+                    "title": "Backup eligibility"
+                },
+                "attestation_requirement": {
+                    "type": "string",
+                    "enum": [
+                        "not_required",
+                        "required"
+                    ],
+                    "title": "Attestation requirement"
+                },
+                "key_protection_types": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": [
+                            "software",
+                            "hardware",
+                            "tee",
+                            "secure_element",
+                            "remote_handle"
+                        ],
+                        "title": "Key protection types"
+                    },
+                    "title": "Key protection types"
+                },
+                "key_protection_match_mode": {
+                    "type": "string",
+                    "enum": [
+                        "any",
+                        "all"
+                    ],
+                    "title": "Key protection match mode"
+                },
                 "max_attempts": {
                     "type": "integer",
                     "minimum": 0,
